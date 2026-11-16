@@ -17,30 +17,35 @@ gcd_u32_asm:
     beq     a1, zero, .Lreturn
 
     li      t0, 0
-
-.Lcommon_twos:
     or      t1, a0, a1
     andi    t1, t1, 1
-    bne     t1, zero, .Lstrip_a
+    bne     t1, zero, .Lcheck_a
 
+.Lcommon_twos:
     srli    a0, a0, 1
     srli    a1, a1, 1
     addi    t0, t0, 1
-    j       .Lcommon_twos
+    or      t1, a0, a1
+    andi    t1, t1, 1
+    beq     t1, zero, .Lcommon_twos
+
+.Lcheck_a:
+    andi    t1, a0, 1
+    bne     t1, zero, .Lcheck_b
 
 .Lstrip_a:
-    andi    t1, a0, 1
-    bne     t1, zero, .Lstrip_b
-
     srli    a0, a0, 1
-    j       .Lstrip_a
+    andi    t1, a0, 1
+    beq     t1, zero, .Lstrip_a
 
-.Lstrip_b:
+.Lcheck_b:
     andi    t1, a1, 1
     bne     t1, zero, .Lorder
 
+.Lstrip_b:
     srli    a1, a1, 1
-    j       .Lstrip_b
+    andi    t1, a1, 1
+    beq     t1, zero, .Lstrip_b
 
 .Lorder:
     bgeu    a1, a0, .Lsubtract
@@ -63,4 +68,3 @@ gcd_u32_asm:
     ret
 
     .size   gcd_u32_asm, .-gcd_u32_asm
-    
