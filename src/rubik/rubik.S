@@ -1,4 +1,4 @@
-/* V2 Rubik solver: packed distances + exact four-move tail, RV32I.
+/* Assignment 2 Rubik solver, hand-written RV32I (no M/F/C or runtime calls).
  * Reuses Assignment 1 permutation/orientation move and distance tables.
  * The final four moves use a small exact, sorted near-goal table.
  *
@@ -43,6 +43,33 @@ rubik_solve_asm:
     la s9, ori_dist_packed
     sw zero, 64(sp)                   /* prefix length is normally 0 */
 
+    /* Use the exact first move for any one of the 2,644 depth-11 states. */
+    slli a0, s10, 10
+    or a0, a0, s11
+    jal ra, .Lnear11_find
+    li t0, -1
+    beq a0, t0, .Lno_prefix
+    andi t5, a0, 15                 /* first move toward solved */
+    sb t5, 0(s3)
+    slli t0, s10, 4
+    slli t1, s10, 1
+    add t0, t0, t1
+    slli t2, t5, 1
+    add t0, t0, t2
+    add t0, t0, s6
+    lhu t0, 0(t0)
+    slli t1, s11, 4
+    slli t2, s11, 1
+    add t1, t1, t2
+    slli t2, t5, 1
+    add t1, t1, t2
+    add t1, t1, s7
+    lhu s11, 0(t1)
+    mv s10, t0
+    addi s3, s3, 1
+    li t0, 1
+    sw t0, 64(sp)
+.Lno_prefix:
     srli t0, s10, 1
     add t0, s8, t0
     lbu t0, 0(t0)
@@ -205,6 +232,33 @@ rubik_solve_asm:
 .Lnext_bound:
     addi s1, s1, 1
     j .Lnew_bound
+
+/* Binary search only the sparse distance-11 root states. */
+.Lnear11_find:
+    li a1, 0
+    li a2, 2644
+    la a6, asm_near11_states
+.Lnear11_loop:
+    bgeu a1, a2, .Lnear11_absent
+    add a3, a1, a2
+    srli a3, a3, 1
+    slli a4, a3, 2
+    add a4, a4, a6
+    lw a4, 0(a4)
+    srli a5, a4, 4
+    bltu a5, a0, .Lnear11_higher
+    bltu a0, a5, .Lnear11_lower
+    mv a0, a4
+    ret
+.Lnear11_higher:
+    addi a1, a3, 1
+    j .Lnear11_loop
+.Lnear11_lower:
+    mv a2, a3
+    j .Lnear11_loop
+.Lnear11_absent:
+    li a0, -1
+    ret
 
 /* Binary search the 2232 packed, sorted exact near-goal states.
  * Input a0 = key, returns packed entry or -1.
@@ -440,4 +494,5 @@ asm_ida_stack:
 
 /* Original Assignment 1 transition/heuristic tables, and small exact table. */
     .include "src/rubik/tables_compact.inc"
+    .include "src/rubik/near11_generated.inc"
     .include "src/rubik/near4_generated.inc"

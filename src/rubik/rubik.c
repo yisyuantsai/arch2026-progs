@@ -1,6 +1,6 @@
 #include "rubik.h"
 
-/* V2: compressed distance + near4 exact tail; adapted
+/* Assignment 1's permutation/orientation tables and IDA* solver, adapted
  * to the Assignment 2 function interface. The 3,674,160-state BFS table
  * from the Assignment 1 verification code is not used on the target.
  */
@@ -12,6 +12,7 @@ enum {
     IDA_MAX_DEPTH = 11
 };
 
+#include "near11_generated.h"
 #include "near4_generated.h"
 #include "tables_compact.h"
 
@@ -96,6 +97,26 @@ static uint8_t heuristic(uint16_t p, uint16_t o)
     hp = (uint8_t) ((p & 1u) ? hp >> 4 : hp & 15u);
     ho = (uint8_t) ((o & 1u) ? ho >> 4 : ho & 15u);
     return hp > ho ? hp : ho;
+}
+
+/* Sparse table for all 2,644 depth-11 states: one exact first move.
+ * It avoids the expensive depth-11 root search without storing every state.
+ */
+static uint32_t near11_find(uint16_t p, uint16_t o)
+{
+    uint32_t key = ((uint32_t) p << 10) | o;
+    uint32_t lo = 0, hi = 2644;
+    while (lo < hi) {
+        uint32_t mid = lo + ((hi - lo) >> 1);
+        uint32_t value = near11_states[mid];
+        if ((value >> 4) < key)
+            lo = mid + 1;
+        else if ((value >> 4) > key)
+            hi = mid;
+        else
+            return value;
+    }
+    return UINT32_MAX;
 }
 
 /* Lookup a state within four moves of solved. A 32-bit entry stores the
@@ -195,12 +216,22 @@ static int ida_search_bound(uint16_t root_p,
 
 static int solve_ida(uint16_t p, uint16_t o)
 {
-    /* V2: search all roots normally; finish within four moves by lookup. */
+    int prefix = 0;
+    uint32_t entry = near11_find(p, o);
+    if (entry != UINT32_MAX) {
+        /* Exact first step of an 11-move state; next state has distance 10. */
+        uint8_t move = (uint8_t) (entry & 15u);
+        solution[0] = move;
+        uint16_t next_p = perm_move[p][move];
+        o = ori_move[o][move];
+        p = next_p;
+        prefix = 1;
+    }
     uint8_t initial = heuristic(p, o);
-    for (uint8_t bound = initial; bound <= IDA_MAX_DEPTH; ++bound) {
-        int result = ida_search_bound(p, o, bound, 0);
+    for (uint8_t bound = initial; bound <= IDA_MAX_DEPTH - prefix; ++bound) {
+        int result = ida_search_bound(p, o, bound, prefix);
         if (result >= 0)
-            return result;
+            return prefix + result;
     }
     return -1;
 }
