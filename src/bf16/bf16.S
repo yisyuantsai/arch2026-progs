@@ -8,11 +8,12 @@
     .type   bf16_from_f32_asm, @function
     .align  2
 bf16_from_f32_asm:
-    srli    t0, a0, 23
-    andi    t0, t0, 255
-    li      t1, 255
-    beq     t0, t1, .Lf32_done
+    # Remove the sign bit and check exponent == 0xFF.
+    slli    t0, a0, 1
+    lui     t1, 0xff000
+    bgeu    t0, t1, .Lf32_done
 
+    # Round to nearest, ties to even.
     srli    t0, a0, 16
     andi    t0, t0, 1
     li      t1, 0x7fff
@@ -22,6 +23,7 @@ bf16_from_f32_asm:
 .Lf32_done:
     srli    a0, a0, 16
     ret
+
     .size   bf16_from_f32_asm, .-bf16_from_f32_asm
 
 
