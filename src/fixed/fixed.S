@@ -9,15 +9,15 @@
     .align  2
 op1_asm:
     li      t0, 0
+    beqz    a1, .Lop1_done
 
 .Lop1_loop:
-    beqz    a1, .Lop1_done
     and     t1, a0, a1
     slli    t1, t1, 1
     xor     a0, a0, a1
     mv      a1, t1
     addi    t0, t0, 1
-    j       .Lop1_loop
+    bnez    a1, .Lop1_loop
 
 .Lop1_done:
     sw      t0, 0(a2)
