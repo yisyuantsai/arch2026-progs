@@ -1,4 +1,4 @@
-/* V1 Rubik solver: original IDA* with uncompressed heuristic, RV32I.
+/* V2 Rubik solver: packed distances + exact four-move tail, RV32I.
  * Reuses Assignment 1 permutation/orientation move and distance tables.
  * The final four moves use a small exact, sorted near-goal table.
  *
@@ -36,16 +36,27 @@ rubik_solve_asm:
 
     la s3, asm_solution
     la s4, asm_allowed_moves
+    la s5, asm_near4_states
     la s6, perm_move
     la s7, ori_move
-    la s8, perm_dist
-    la s9, ori_dist
+    la s8, perm_dist_packed
+    la s9, ori_dist_packed
     sw zero, 64(sp)                   /* prefix length is normally 0 */
 
-    add t0, s8, s10
+    srli t0, s10, 1
+    add t0, s8, t0
     lbu t0, 0(t0)
-    add t1, s9, s11
+    andi t1, s10, 1
+    slli t1, t1, 2
+    srl t0, t0, t1
+    andi t0, t0, 15
+    srli t1, s11, 1
+    add t1, s9, t1
     lbu t1, 0(t1)
+    andi t2, s11, 1
+    slli t2, t2, 2
+    srl t1, t1, t2
+    andi t1, t1, 15
     mv s1, t0
     bgeu s1, t1, .Lnew_bound
     mv s1, t1
@@ -67,10 +78,59 @@ rubik_solve_asm:
     or t2, t0, t1
     beqz t2, .Lfound_at_depth
 
-    /* Standard IDA*: stop expanding once the current bound is reached. */
-    bgeu s0, s1, .Lbacktrack
-    j .Lexpand
+    sub t2, s1, s0                   /* steps remaining under bound */
+    li t3, 4
+    bgtu t2, t3, .Lexpand
 
+    /* Exact four-move cutoff: key = (p << 10) | o. */
+    slli a0, t0, 10
+    or a0, a0, t1
+    jal ra, .Lnear4_find
+    li t3, -1
+    beq a0, t3, .Lbacktrack
+    srli t3, a0, 4
+    andi t3, t3, 15                 /* exact remaining distance */
+    bgtu t3, t2, .Lbacktrack
+
+    add a7, s0, t3                   /* full optimal solution length */
+    mv t4, s0                        /* output move index */
+    mv t5, t0                        /* current p */
+    mv t6, t1                        /* current o */
+    mv a6, a0                        /* packed near-goal entry */
+.Lfinish_loop:
+    srli t3, a6, 4
+    andi t3, t3, 15
+    beqz t3, .Lfound_exact
+    andi t3, a6, 15                 /* next move toward solved */
+    add a0, s3, t4
+    sb t3, 0(a0)
+
+    slli a1, t5, 4                  /* p * 18 = p * 16 + p * 2 */
+    slli a2, t5, 1
+    add a1, a1, a2
+    slli a2, t3, 1
+    add a1, a1, a2
+    add a1, a1, s6
+    lhu t5, 0(a1)
+
+    slli a1, t6, 4                  /* o * 18 + move * 2 */
+    slli a2, t6, 1
+    add a1, a1, a2
+    slli a2, t3, 1
+    add a1, a1, a2
+    add a1, a1, s7
+    lhu t6, 0(a1)
+
+    addi t4, t4, 1
+    slli a0, t5, 10
+    or a0, a0, t6
+    jal ra, .Lnear4_find
+    mv a6, a0
+    j .Lfinish_loop
+
+.Lfound_exact:
+    mv a0, a7
+    j .Lfound
 .Lfound_at_depth:
     mv a0, s0
     j .Lfound
@@ -106,10 +166,20 @@ rubik_solve_asm:
     add a1, a1, s7
     lhu t3, 0(a1)                   /* next o */
 
-    add a1, s8, t2
+    srli a1, t2, 1
+    add a1, s8, a1
     lbu a1, 0(a1)
-    add a2, s9, t3
+    andi a2, t2, 1
+    slli a2, a2, 2
+    srl a1, a1, a2
+    andi a1, a1, 15
+    srli a2, t3, 1
+    add a2, s9, a2
     lbu a2, 0(a2)
+    andi a3, t3, 1
+    slli a3, a3, 2
+    srl a2, a2, a3
+    andi a2, a2, 15
     bgeu a1, a2, .Lheur_ready
     mv a1, a2
 .Lheur_ready:
@@ -135,6 +205,39 @@ rubik_solve_asm:
 .Lnext_bound:
     addi s1, s1, 1
     j .Lnew_bound
+
+/* Binary search the 2232 packed, sorted exact near-goal states.
+ * Input a0 = key, returns packed entry or -1.
+ * Does not clobber t0..t6, a6 or a7 (used by the finishing loop).
+ */
+.Lnear4_find:
+    srli a1, a0, 14                /* bucket: permutation >> 4 */
+    slli a1, a1, 1
+    la a2, asm_near4_index
+    add a1, a1, a2
+    lhu a2, 2(a1)                  /* exclusive upper index */
+    lhu a1, 0(a1)                  /* inclusive lower index */
+.Lnear4_loop:
+    bgeu a1, a2, .Lnear4_absent
+    add a3, a1, a2
+    srli a3, a3, 1
+    slli a4, a3, 2
+    add a4, a4, s5
+    lw a4, 0(a4)
+    srli a5, a4, 8
+    bltu a5, a0, .Lnear4_higher
+    bltu a0, a5, .Lnear4_lower
+    mv a0, a4
+    ret
+.Lnear4_higher:
+    addi a1, a3, 1
+    j .Lnear4_loop
+.Lnear4_lower:
+    mv a2, a3
+    j .Lnear4_loop
+.Lnear4_absent:
+    li a0, -1
+    ret
 
 /* Convert permutation/orientation digits to compact ranks.
  * Uses only caller-saved registers; returns a0=p, a1=o, or a0=-1.
@@ -336,4 +439,5 @@ asm_ida_stack:
     .space 96
 
 /* Original Assignment 1 transition/heuristic tables, and small exact table. */
-    .include "src/rubik/tables_generated.inc"
+    .include "src/rubik/tables_compact.inc"
+    .include "src/rubik/near4_generated.inc"

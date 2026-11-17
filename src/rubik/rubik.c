@@ -1,6 +1,6 @@
 #include "rubik.h"
 
-/* Assignment 1's permutation/orientation tables and IDA* solver, adapted
+/* V2: compressed distance + near4 exact tail; adapted
  * to the Assignment 2 function interface. The 3,674,160-state BFS table
  * from the Assignment 1 verification code is not used on the target.
  */
@@ -12,7 +12,8 @@ enum {
     IDA_MAX_DEPTH = 11
 };
 
-#include "tables_generated.h"
+#include "near4_generated.h"
+#include "tables_compact.h"
 
 /* For each preceding face (R/B/D), allow only the other two faces.
  * The high nibble gives the next previous-face index, and the low nibble
@@ -90,16 +91,67 @@ static int parse_and_rank(const char *state, uint16_t *p, uint16_t *o)
 
 static uint8_t heuristic(uint16_t p, uint16_t o)
 {
-    uint8_t hp = perm_dist[p];
-    uint8_t ho = ori_dist[o];
+    uint8_t hp = perm_dist_packed[p >> 1];
+    uint8_t ho = ori_dist_packed[o >> 1];
+    hp = (uint8_t) ((p & 1u) ? hp >> 4 : hp & 15u);
+    ho = (uint8_t) ((o & 1u) ? ho >> 4 : ho & 15u);
     return hp > ho ? hp : ho;
 }
 
-/* Iterative DFS with IDA* pruning; the stack stores compact ranks instead
- * of a complete 14-byte cube at each depth. This is the Assignment 1
- * search strategy, preserving the move order and same-face pruning.
+/* Lookup a state within four moves of solved. A 32-bit entry stores the
+ * (permutation, orientation) key and its shortest distance/next move.
+ * Binary search avoids a full-state lookup table and stays under 128 KiB.
  */
-static int ida_search_bound(uint16_t root_p, uint16_t root_o, uint8_t bound)
+static uint32_t near4_find(uint16_t p, uint16_t o)
+{
+    uint32_t key = ((uint32_t) p << 10) | o;
+    uint32_t bucket = p >> 4;
+    uint32_t lo = near4_index[bucket];
+    uint32_t hi = near4_index[bucket + 1];
+    while (lo < hi) {
+        uint32_t mid = lo + ((hi - lo) >> 1);
+        uint32_t entry = near4_states[mid];
+        uint32_t stored = entry >> 8;
+        if (stored < key)
+            lo = mid + 1;
+        else if (stored > key)
+            hi = mid;
+        else
+            return entry;
+    }
+    return UINT32_MAX;
+}
+
+/* Finish the final four moves with exact distances, not a heuristic.
+ * A match cannot produce a longer-than-bound solution.
+ */
+static int near4_finish(uint16_t p,
+                        uint16_t o,
+                        int depth,
+                        int remaining,
+                        int prefix)
+{
+    uint32_t entry = near4_find(p, o);
+    if (entry == UINT32_MAX || ((entry >> 4) & 15u) > (unsigned) remaining)
+        return -1;
+
+    while (((entry >> 4) & 15u) != 0) {
+        uint8_t move = (uint8_t) (entry & 15u);
+        solution[prefix + depth++] = move;
+        p = perm_move[p][move];
+        o = ori_move[o][move];
+        entry = near4_find(p, o);
+    }
+    return depth;
+}
+
+/* IDA* with the Assignment 1 permutation/orientation heuristics, a fixed
+ * stack, same-face pruning, and a small exact four-move finishing table.
+ */
+static int ida_search_bound(uint16_t root_p,
+                            uint16_t root_o,
+                            uint8_t bound,
+                            int prefix)
 {
     uint8_t sp = 0;
     ida_stack[0].p = root_p;
@@ -110,39 +162,46 @@ static int ida_search_bound(uint16_t root_p, uint16_t root_o, uint8_t bound)
     for (;;) {
         ida_frame_t *frame = &ida_stack[sp];
         if (frame->p == 0 && frame->o == 0)
-            return 1;
+            return sp;
 
-        if (frame->next_i >= allowed_count[frame->prev_index]) {
-            if (sp == 0)
-                return 0;
-            --sp;
+        int remaining = (int) bound - (int) sp;
+        if (remaining <= 4) {
+            int result =
+                near4_finish(frame->p, frame->o, sp, remaining, prefix);
+            if (result >= 0)
+                return result;
+        } else if (frame->next_i < allowed_count[frame->prev_index]) {
+            uint8_t entry = allowed_moves[frame->prev_index][frame->next_i++];
+            uint8_t move = (uint8_t) (entry & 15u);
+            uint16_t next_p = perm_move[frame->p][move];
+            uint16_t next_o = ori_move[frame->o][move];
+            uint8_t next_depth = (uint8_t) (sp + 1u);
+            if ((unsigned) next_depth + heuristic(next_p, next_o) > bound)
+                continue;
+            solution[prefix + sp] = move;
+            ++sp;
+            ida_stack[sp].p = next_p;
+            ida_stack[sp].o = next_o;
+            ida_stack[sp].prev_index = (uint8_t) (entry >> 4);
+            ida_stack[sp].next_i = 0;
             continue;
         }
 
-        uint8_t entry = allowed_moves[frame->prev_index][frame->next_i++];
-        uint8_t move = (uint8_t) (entry & 0x0f);
-        uint8_t next_face = (uint8_t) (entry >> 4);
-        uint16_t next_p = perm_move[frame->p][move];
-        uint16_t next_o = ori_move[frame->o][move];
-        uint8_t next_depth = (uint8_t) (sp + 1u);
-
-        if ((unsigned) next_depth + heuristic(next_p, next_o) > bound)
-            continue;
-
-        solution[sp] = move;
-        ++sp;
-        ida_stack[sp].p = next_p;
-        ida_stack[sp].o = next_o;
-        ida_stack[sp].prev_index = next_face;
-        ida_stack[sp].next_i = 0;
+        if (sp == 0)
+            return -1;
+        --sp;
     }
 }
 
 static int solve_ida(uint16_t p, uint16_t o)
 {
-    for (uint8_t bound = heuristic(p, o); bound <= IDA_MAX_DEPTH; ++bound)
-        if (ida_search_bound(p, o, bound))
-            return bound;
+    /* V2: search all roots normally; finish within four moves by lookup. */
+    uint8_t initial = heuristic(p, o);
+    for (uint8_t bound = initial; bound <= IDA_MAX_DEPTH; ++bound) {
+        int result = ida_search_bound(p, o, bound, 0);
+        if (result >= 0)
+            return result;
+    }
     return -1;
 }
 
@@ -156,18 +215,14 @@ int rubik_solve(const char *state, char *out, size_t cap)
     if (moves < 0)
         return -1; /* No valid cube state should reach this branch. */
 
-    /* Avoid RV32I division/modulo helper functions. */
+    /* Avoid RV32I software division/modulo in move formatting. */
     static const char move_faces[9] = {'R', 'R', 'R', 'B', 'B',
                                        'B', 'D', 'D', 'D'};
-
     static const char move_suffix[9] = {0,    '2', '\'', 0,   '2',
                                         '\'', 0,   '2',  '\''};
-
     size_t length = 0;
-
     for (int i = 0; i < moves; ++i) {
         length += move_suffix[solution[i]] ? 2u : 1u;
-
         if (i != 0)
             ++length;
     }
@@ -175,20 +230,15 @@ int rubik_solve(const char *state, char *out, size_t cap)
     if (length >= cap) {
         if (cap != 0)
             out[0] = '\0';
-
         return -2;
     }
 
     size_t k = 0;
-
     for (int i = 0; i < moves; ++i) {
         uint8_t move = solution[i];
-
         if (i != 0)
             out[k++] = ' ';
-
         out[k++] = move_faces[move];
-
         if (move_suffix[move])
             out[k++] = move_suffix[move];
     }
